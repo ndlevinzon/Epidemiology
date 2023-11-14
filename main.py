@@ -2,17 +2,55 @@ import folium
 import webbrowser
 import os
 import requests
-import csv
 import pandas as pd
+from requests.exceptions import RequestException
 from sklearn.linear_model import LinearRegression
 
-def spatial_interpolation(csv_path):
-    # Load the CSV data into a DataFrame
-    county_data = pd.read_csv(csv_path)
+def get_state_and_county_populations():
+    # Fetch state populations
+    state_url = "https://api.census.gov/data/2019/pep/population?get=POP,NAME&for=state:*"
+    try:
+        state_response = requests.get(state_url)
+        state_response.raise_for_status()
+        state_data = state_response.json()[1:]
+        state_populations = pd.DataFrame(state_data, columns=['Population', 'State_Name', 'State_FIPS'])
+        state_populations['Population'] = state_populations['Population'].astype(int)
+    except RequestException as e:
+        print(f"Error fetching state data: {e}")
+        return None
 
+    # Fetch county populations
+    county_url = "https://api.census.gov/data/2019/pep/population?get=POP,NAME&for=county:*"
+    try:
+        county_response = requests.get(county_url)
+        county_response.raise_for_status()
+        county_data = county_response.json()[1:]
+
+        # Print the first few rows of county_data
+        print("County Data Sample:", county_data[:5])
+
+        # Adjust columns based on the actual structure of county_data
+        county_populations = pd.DataFrame(county_data, columns=['Population', 'County_Name', 'State_FIPS', 'County_FIPS'])
+        county_populations['Population'] = county_populations['Population'].astype(int)
+    except RequestException as e:
+        print(f"Error fetching county data: {e}")
+        return state_populations
+
+    return state_populations, county_populations
+
+# Fetch populations
+populations_result = get_state_and_county_populations()
+
+# Unpack the result into state_populations and county_populations
+state_populations, county_populations = populations_result
+
+print(state_populations)
+print(county_populations)
+
+def spatial_interpolation(county_populations):
     # Sample data for Ukrainian immigrants in a subset of counties
     ukrainian_immigrants_data = {
-        'County': ['Sacramento County, California', 'Roseville County, California', 'Folsom County, California',
+        'County_Name': ['Sacramento County, California', 'Roseville County, California', 'Folsom County, California',
                    'San Francisco County, California', 'Oakland County, California', 'Berkeley, California',
                    'San Jose County, California', 'Sunnyvale County, California', 'Santa Clara County, California',
                    'Los Angeles County, California', 'Long Beach County, California', 'Anaheim County, California',
@@ -65,7 +103,7 @@ def spatial_interpolation(csv_path):
     ukrainian_immigrants_df = pd.DataFrame(ukrainian_immigrants_data)
 
     # Merge county population data with Ukrainian immigrants data
-    merged_data = pd.merge(county_data, ukrainian_immigrants_df, on='County', how='left')
+    merged_data = pd.merge(county_populations, ukrainian_immigrants_df, on='County_Name', how='left')
 
     # Fill missing values with 0 for counties with no Ukrainian immigrants data
     merged_data['Ukrainian_Immigrants'].fillna(0, inplace=True)
@@ -78,87 +116,44 @@ def spatial_interpolation(csv_path):
     model.fit(X, y)
 
     # Predict Ukrainian immigrants for all counties based on the population
-    county_data['Predicted_Ukrainian_Immigrants'] = model.predict(county_data[['Population']])
+    merged_data['Predicted_Ukrainian_Immigrants'] = model.predict(merged_data[['Population']])
 
     # Replace negative values with 0
-    county_data['Predicted_Ukrainian_Immigrants'] = county_data['Predicted_Ukrainian_Immigrants'].apply(
-        lambda x: max(0, round(x)))
+    merged_data['Predicted_Ukrainian_Immigrants'] = merged_data['Predicted_Ukrainian_Immigrants'].clip(lower=0).round().astype(int)
 
-    # Display the DataFrame with predicted values
-    print(county_data)
+    return merged_data[['County_Name', 'County_FIPS', 'Population', 'Predicted_Ukrainian_Immigrants']]
 
-    # Append the source CSV with the predicted Ukrainian immigrants data
-    county_data.to_csv(csv_path, mode='a', header=False, index=False)
+# Perform spatial interpolation
+predicted_data = spatial_interpolation(county_populations)
 
-    return county_data
-
-
-def get_state_and_county_populations():
-    # Fetch state populations
-    state_base_url = "https://api.census.gov/data/2019/pep/population"
-    state_url = f"{state_base_url}?get=POP,NAME&for=state:*"
-    state_response = requests.get(state_url)
-    state_data = state_response.json()
-
-    # Mapping state FIPS codes to populations
-    state_populations = {state[1]: int(state[0]) for state in state_data[1:]}
-
-    # Fetch county populations
-    county_base_url = "https://api.census.gov/data/2019/pep/population"
-    county_url = f"{county_base_url}?get=POP,NAME&for=county:*"
-    county_response = requests.get(county_url)
-    county_data = county_response.json()
-
-    # Mapping county FIPS codes to populations
-    county_populations = {county[1]: int(county[0]) for county in county_data[1:]}
-
-    return state_populations, county_populations
-
-state_populations, county_populations = get_state_and_county_populations()
-
+# Create GeoJSON map
 us_states_geojson_path = 'gadm41_USA_2.json'
 us_states_geojson = folium.GeoJson(us_states_geojson_path, name='geojson')
 
-interpolation_csv_data = []
-
 # Manually add population data to GeoJSON
 for feature in us_states_geojson.data['features']:
-    state_name = feature['properties']['NAME_1']
-    county_name = feature['properties']['NAME_2']
+    state_name, county_name = feature['properties']['NAME_1'], feature['properties']['NAME_2']
     formatted_county_name = f"{county_name} County, {state_name}"
 
-    state_population = state_populations.get(state_name, 0)
-    county_population = county_populations.get(formatted_county_name, 0)
+    # Find the corresponding row in state_populations DataFrame
+    state_row = state_populations[state_populations['State_Name'] == state_name]
+    state_population = int(state_row['Population'].values[0]) if not state_row.empty else 0
+
+    # Find the corresponding row in county_populations DataFrame
+    county_row = county_populations[county_populations['County_Name'] == formatted_county_name]
+    county_population = int(county_row['Population'].values[0]) if not county_row.empty else 0
 
     feature['properties']['State_Population'] = state_population
     feature['properties']['County_Population'] = county_population
 
-    interpolation_csv_data.append([formatted_county_name, county_population])
-
-csv_file_path = 'county_population_data.csv'
-with open(csv_file_path, 'w', newline='') as csvfile:
-    csv_writer = csv.writer(csvfile)
-    csv_writer.writerow(['County', 'Population'])
-    print(['County', 'Population'])
-    csv_writer.writerows(interpolation_csv_data)
-
-# Perform spatial interpolation
-predicted_data = spatial_interpolation(csv_path='county_population_data.csv')
-
 # Add a new GeoJSON field for predicted Ukrainian immigrants
 for feature in us_states_geojson.data['features']:
     county_name = feature['properties']['NAME_2']
-    # Check if there is a match in the predicted_data DataFrame
-    match = predicted_data[predicted_data['County'] == county_name]
-    if not match.empty:
-        predicted_value = match['Predicted_Ukrainian_Immigrants'].values[0]
-        feature['properties']['Predicted_Ukrainian_Immigrants'] = predicted_value
-    else:
-        # If there is no match, set the field to 0 or any other default value
-        feature['properties']['Predicted_Ukrainian_Immigrants'] = 0
+    match = predicted_data[predicted_data['County_Name'] == county_name]
+    feature['properties']['Predicted_Ukrainian_Immigrants'] = int(match['Predicted_Ukrainian_Immigrants'].values[0]) if not match.empty else 0
 
 # Create a map centered on the United States
-us_map = folium.Map()
+us_map = folium.Map(location=[37.0902, -95.7129], zoom_start=4)
 
 # Add GeoJSON data to the map
 us_states_geojson.add_to(us_map)
@@ -168,19 +163,16 @@ popup = folium.features.GeoJsonPopup(
     fields=['NAME_1', 'State_Population', 'NAME_2', 'County_Population', 'Predicted_Ukrainian_Immigrants'],
     aliases=['State: ', 'State Population: ', 'County: ', 'County Population: ', 'Predicted Ukrainian Immigrants: '],
     labels=True, style="background-color: yellow;",
-    parse_html=False  # Set parse_html to False to handle formatting manually
+    parse_html=False
 )
 
-# Convert predicted values to integers before displaying in the popup
-for feature in us_states_geojson.data['features']:
-    feature['properties']['Predicted_Ukrainian_Immigrants'] = int(feature['properties']['Predicted_Ukrainian_Immigrants'])
 
 # Add the popup to the GeoJSON layer
 us_states_geojson.add_child(popup)
 
 # Save the map to a temporary HTML file
 temp_html_path = 'temp_us_map.html'
-us_map.save(temp_html_path)
+us_map.save(temp_html_path, minify_html=True)
 
 # Open the HTML file in the default web browser
 webbrowser.open('file://' + os.path.realpath(temp_html_path))
