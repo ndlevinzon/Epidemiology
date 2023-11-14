@@ -11,7 +11,6 @@ def spatial_interpolation(csv_path):
     county_data = pd.read_csv(csv_path)
 
     # Sample data for Ukrainian immigrants in a subset of counties
-    # (https://www.migrationpolicy.org/programs/data-hub/charts/us-immigrant-population-metropolitan-area?width=850&height=850&iframe=true)
     ukrainian_immigrants_data = {
         'County': ['Sacramento County, California', 'Roseville County, California', 'Folsom County, California',
                    'San Francisco County, California', 'Oakland County, California', 'Berkeley, California',
@@ -82,14 +81,18 @@ def spatial_interpolation(csv_path):
     county_data['Predicted_Ukrainian_Immigrants'] = model.predict(county_data[['Population']])
 
     # Replace negative values with 0
-    county_data['Predicted_Ukrainian_Immigrants'] = county_data['Predicted_Ukrainian_Immigrants'].apply(lambda x: max(0, x))
+    county_data['Predicted_Ukrainian_Immigrants'] = county_data['Predicted_Ukrainian_Immigrants'].apply(
+        lambda x: max(0, round(x)))
 
     # Display the DataFrame with predicted values
     print(county_data)
 
+    # Append the source CSV with the predicted Ukrainian immigrants data
+    county_data.to_csv(csv_path, mode='a', header=False, index=False)
+
     return county_data
 
-# Function to fetch state and county populations
+
 def get_state_and_county_populations():
     # Fetch state populations
     state_base_url = "https://api.census.gov/data/2019/pep/population"
@@ -111,21 +114,17 @@ def get_state_and_county_populations():
 
     return state_populations, county_populations
 
-# Fetch populations
 state_populations, county_populations = get_state_and_county_populations()
 
-# Load GeoJSON data for US state boundaries
 us_states_geojson_path = 'gadm41_USA_2.json'
 us_states_geojson = folium.GeoJson(us_states_geojson_path, name='geojson')
 
-# Prepare data for CSV
 interpolation_csv_data = []
 
 # Manually add population data to GeoJSON
 for feature in us_states_geojson.data['features']:
     state_name = feature['properties']['NAME_1']
     county_name = feature['properties']['NAME_2']
-    # Format the county name
     formatted_county_name = f"{county_name} County, {state_name}"
 
     state_population = state_populations.get(state_name, 0)
@@ -134,14 +133,13 @@ for feature in us_states_geojson.data['features']:
     feature['properties']['State_Population'] = state_population
     feature['properties']['County_Population'] = county_population
 
-    # Append data to CSV
     interpolation_csv_data.append([formatted_county_name, county_population])
 
-# Write data to CSV file
 csv_file_path = 'county_population_data.csv'
 with open(csv_file_path, 'w', newline='') as csvfile:
     csv_writer = csv.writer(csvfile)
     csv_writer.writerow(['County', 'Population'])
+    print(['County', 'Population'])
     csv_writer.writerows(interpolation_csv_data)
 
 # Perform spatial interpolation
@@ -155,6 +153,9 @@ for feature in us_states_geojson.data['features']:
     if not match.empty:
         predicted_value = match['Predicted_Ukrainian_Immigrants'].values[0]
         feature['properties']['Predicted_Ukrainian_Immigrants'] = predicted_value
+    else:
+        # If there is no match, set the field to 0 or any other default value
+        feature['properties']['Predicted_Ukrainian_Immigrants'] = 0
 
 # Create a map centered on the United States
 us_map = folium.Map()
@@ -163,21 +164,19 @@ us_map = folium.Map()
 us_states_geojson.add_to(us_map)
 
 # Add a popup with state names, populations, and predicted Ukrainian immigrants on hover
-popup = folium.features.GeoJsonPopup(fields=['NAME_1', 'State_Population', 'NAME_2', 'County_Population', 'Predicted_Ukrainian_Immigrants'],
-                                     aliases=['State: ', 'State Population: ', 'County: ', 'County Population: ', 'Predicted Ukrainian Immigrants: '],
-                                     labels=True, style="background-color: yellow;")
+popup = folium.features.GeoJsonPopup(
+    fields=['NAME_1', 'State_Population', 'NAME_2', 'County_Population', 'Predicted_Ukrainian_Immigrants'],
+    aliases=['State: ', 'State Population: ', 'County: ', 'County Population: ', 'Predicted Ukrainian Immigrants: '],
+    labels=True, style="background-color: yellow;",
+    parse_html=False  # Set parse_html to False to handle formatting manually
+)
+
+# Convert predicted values to integers before displaying in the popup
+for feature in us_states_geojson.data['features']:
+    feature['properties']['Predicted_Ukrainian_Immigrants'] = int(feature['properties']['Predicted_Ukrainian_Immigrants'])
+
+# Add the popup to the GeoJSON layer
 us_states_geojson.add_child(popup)
-
-# Add a text box at the top right with a title and subtitles
-title_html = """
-    <h3 align="center" style="font-size:16px"><b>Title</b></h3>
-    <h4 align="center" style="font-size:12px">Subtitle 1</h4>
-    <h4 align="center" style="font-size:12px">Subtitle 2</h4>
-"""
-
-title_box = folium.Html(title_html, script=True)
-title_popup = folium.Popup(title_box, max_width=300)
-title_popup.add_to(us_map)
 
 # Save the map to a temporary HTML file
 temp_html_path = 'temp_us_map.html'
