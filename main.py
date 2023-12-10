@@ -1,178 +1,138 @@
 import folium
-import webbrowser
 import os
-import requests
+import webbrowser
+import censusdata
 import pandas as pd
-from requests.exceptions import RequestException
-from sklearn.linear_model import LinearRegression
+import requests
 
-def get_state_and_county_populations():
-    # Fetch state populations
-    state_url = "https://api.census.gov/data/2019/pep/population?get=POP,NAME&for=state:*"
-    try:
-        state_response = requests.get(state_url)
-        state_response.raise_for_status()
-        state_data = state_response.json()[1:]
-        state_populations = pd.DataFrame(state_data, columns=['Population', 'State_Name', 'State_FIPS'])
-        state_populations['Population'] = state_populations['Population'].astype(int)
-    except RequestException as e:
-        print(f"Error fetching state data: {e}")
-        return None
+def load_county_names(filename):
+    county_names_df = pd.read_csv(filename, sep='\t', dtype=str)
+    county_names_df['StateFIPS'] = county_names_df['StateFIPS'].str.zfill(2)
+    county_names_df['CountyFIPS_3'] = county_names_df['CountyFIPS_3'].str.zfill(3)
+    return county_names_df
 
-    # Fetch county populations
-    county_url = "https://api.census.gov/data/2019/pep/population?get=POP,NAME&for=county:*"
-    try:
-        county_response = requests.get(county_url)
-        county_response.raise_for_status()
-        county_data = county_response.json()[1:]
+def replace_fips_with_names(county_data, county_names):
+    merged_data = pd.merge(county_data, county_names, how='left', left_on=['State', 'County'],
+                           right_on=['StateFIPS', 'CountyFIPS_3'])
+    merged_data = merged_data.drop(['StateFIPS', 'CountyFIPS_3'], axis=1)
+    return merged_data
 
-        # Print the first few rows of county_data
-        print("County Data Sample:", county_data[:5])
+def get_county_population():
+    variables = [
+        'B01003_001E',  # Total population
+        'B05004_001E',  # Total population age 18 and over
+        'B05004_010E',  # Total population age 18 and over who are smokers
+        'B05004_013E',  # Total population age 18 and over who are obese
+        'B06011_001E',  # Median household income (in the past 12 months)
+    ]
 
-        # Adjust columns based on the actual structure of county_data
-        county_populations = pd.DataFrame(county_data, columns=['Population', 'County_Name', 'State_FIPS', 'County_FIPS'])
-        county_populations['Population'] = county_populations['Population'].astype(int)
-    except RequestException as e:
-        print(f"Error fetching county data: {e}")
-        return state_populations
+    dataset = 'acs5'
+    year = 2019
 
-    return state_populations, county_populations
+    counties = censusdata.geographies(censusdata.censusgeo([('state', '*'), ('county', '*')]), dataset, year)
 
-# Fetch populations
-populations_result = get_state_and_county_populations()
+    county_data = censusdata.download(dataset, year, censusdata.censusgeo([('state', '*'), ('county', '*')]), variables)
 
-# Unpack the result into state_populations and county_populations
-state_populations, county_populations = populations_result
+    county_data['Population'] = county_data['B01003_001E']
+    county_data['Prevalence_Tobacco_Use'] = county_data['B05004_010E']
+    county_data['Prevalence_Obesity'] = county_data['B05004_013E']
+    county_data['Median_Income'] = county_data['B06011_001E']
 
-print(state_populations)
-print(county_populations)
+    county_data_final_df = pd.DataFrame({
+        'State': [code.params()[0][1] for code in county_data.index],
+        'County': [code.params()[1][1] for code in county_data.index],
+        'Population': county_data['Population'],
+        'Prevalence_Tobacco': county_data['Prevalence_Tobacco_Use'],
+        'Prevalence_Obesity': county_data['Prevalence_Obesity'],
+        'Median_Income': county_data['Median_Income']
+    })
 
-def spatial_interpolation(county_populations):
-    # Sample data for Ukrainian immigrants in a subset of counties
-    ukrainian_immigrants_data = {
-        'County_Name': ['Sacramento County, California', 'Roseville County, California', 'Folsom County, California',
-                   'San Francisco County, California', 'Oakland County, California', 'Berkeley, California',
-                   'San Jose County, California', 'Sunnyvale County, California', 'Santa Clara County, California',
-                   'Los Angeles County, California', 'Long Beach County, California', 'Anaheim County, California',
-                   'Portland County, Oregon', 'Vancouver County, Washington', 'Hillsboro County, Oregon',
-                   'Seattle County, Washington', 'Tacoma County, Washington', 'Bellevue County, Washington',
-                   'Spokane County, Washington', 'Spokane Valley County, Washington',
-                   'Denver County, Colorado', 'Aurora County, Colorado', 'Lakewood County, Colorado',
-                   'Dallas County, Texas', 'Fort Worth County, Texas', 'Arlington County, Texas',
-                   'Minneapolis County, Minnesota', 'St. Paul County, Minnesota', 'Bloomington County, Wisconsin',
-                   'Chicago County, Illinois', 'Naperville County, Indiana', 'Elgin County, Wisconsin',
-                   'Detroit County, Michigan', 'Warren County, Michigan', 'Dearborn County, Michigan',
-                   'Atlanta County, Georgia', 'Sandy Springs County, Georgia', 'Alpharetta County, Georgia',
-                   'Cleveland County, Ohio', 'Elyria County, Ohio',
-                   'Charlotte County, North Carolina', 'Concord County, North Carolina', 'Gastonia County, North Carolina',
-                   'Arlington County, Virginia', 'Alexandria County, Virginia',
-                   'Baltimore County, Maryland', 'Columbia County, Maryland', 'Towson County, Maryland',
-                   'Tampa County, Florida', 'St. Petersburg County, Florida', 'Clearwater County, Florida',
-                   'Miami County, Florida', 'Fort Lauderdale County, Florida', 'Pompano Beach County, Florida',
-                   'Philadelphia County, Pennsylvania', 'Camden County, New Jersey', 'Wilmington County, Delaware',
-                   'New York County, New York', 'Newark County, New Jersey', 'Jersey City, New Jersey',
-                   'Bridgeport County, Connecticut', 'Stamford County, Connecticut', 'Norwalk County, Connecticut',
-                   'Springfield County, Massachusetts',
-                   'Boston County, Massachusetts', 'Cambridge County, Massachusetts', 'Newton County, New Hampshire'],
-        'Ukrainian_Immigrants': [6000, 6000, 6000,
-                                 3667, 3667, 3667,
-                                 1667, 1667, 1667,
-                                 5667, 5667, 5667,
-                                 4667, 4667, 4667,
-                                 8333, 8333, 8333,
-                                 1000, 1000,
-                                 667, 667, 667,
-                                 1000, 1000, 1000,
-                                 1333, 1333, 1333,
-                                 9333, 9333, 9333,
-                                 1667, 1667, 1667,
-                                 1000, 1000, 1000,
-                                 3000, 3000,
-                                 1000, 1000, 1000,
-                                 3000, 3000,
-                                 1000, 1000, 1000,
-                                 1000, 1000, 1000,
-                                 2667, 2667, 2667,
-                                 4000, 4000, 4000,
-                                 29333, 29333, 29333,
-                                 667, 667, 667,
-                                 2000,
-                                 2333, 2333, 2333]
-    }
+    # county_names_df = load_county_names('C:/Users/Nate Levinzon/PycharmProjects/epidemiology/fips2county.tsv')
+    # county_data_final_df = replace_fips_with_names(county_data_final_df, county_names_df)
 
-    ukrainian_immigrants_df = pd.DataFrame(ukrainian_immigrants_data)
+    # Keep only the desired columns
+    county_data_final_df = county_data_final_df[
+        ['State', 'County', 'Population', 'Prevalence_Tobacco', 'Prevalence_Obesity', 'Median_Income']]
 
-    # Merge county population data with Ukrainian immigrants data
-    merged_data = pd.merge(county_populations, ukrainian_immigrants_df, on='County_Name', how='left')
+    return county_data_final_df
 
-    # Fill missing values with 0 for counties with no Ukrainian immigrants data
-    merged_data['Ukrainian_Immigrants'].fillna(0, inplace=True)
+# Download the GeoJSON file for US counties
+geojson_url = 'https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json'
 
-    # Perform linear regression
-    X = merged_data[['Population']]
-    y = merged_data['Ukrainian_Immigrants']
+# Fetch the GeoJSON features using the requests library
+response = requests.get(geojson_url)
+geojson_data = response.json()
 
-    model = LinearRegression()
-    model.fit(X, y)
+# Check the structure of GeoJSON data
+if 'features' in geojson_data and isinstance(geojson_data['features'], list) and len(geojson_data['features']) > 0:
+    sample_feature = geojson_data['features'][0]
+    if 'properties' in sample_feature:
+        sample_properties = sample_feature['properties']
+        if isinstance(sample_properties, dict):
+            property_keys = sample_properties.keys()
+            print(f"Sample GeoJSON properties keys: {property_keys}")
+        else:
+            print("Sample GeoJSON properties are not a dictionary.")
+    else:
+        print("Sample GeoJSON feature does not have 'properties' key.")
+else:
+    print("GeoJSON data does not have 'features' key or is not a list.")
 
-    # Predict Ukrainian immigrants for all counties based on the population
-    merged_data['Predicted_Ukrainian_Immigrants'] = model.predict(merged_data[['Population']])
+# Create a DataFrame with some sample data
+county_data = get_county_population()
 
-    # Replace negative values with 0
-    merged_data['Predicted_Ukrainian_Immigrants'] = merged_data['Predicted_Ukrainian_Immigrants'].clip(lower=0).round().astype(int)
+# Add new columns for state and county to the GeoJSON DataFrame
+geojson_df = pd.DataFrame(geojson_data.get('features', []))
+geojson_df[['STATE', 'COUNTY']] = pd.DataFrame([feature.get('properties', {}) for feature in geojson_data.get('features', [])]).fillna('NA')[['STATE', 'COUNTY']]
 
-    return merged_data[['County_Name', 'County_FIPS', 'Population', 'Predicted_Ukrainian_Immigrants']]
+# Merge the GeoJSON data with the DataFrame using the new columns
+merged_data = pd.merge(geojson_df, county_data, left_on=['STATE', 'COUNTY'], right_on=['State', 'County'], how='left')
 
-# Perform spatial interpolation
-predicted_data = spatial_interpolation(county_populations)
+# Uncomment the following code to replace FIPS codes with names
+county_names_df = load_county_names('C:/Users/Nate Levinzon/PycharmProjects/epidemiology/fips2county.tsv')
+merged_data = replace_fips_with_names(merged_data, county_names_df)
 
-# Create GeoJSON map
-us_states_geojson_path = 'gadm41_USA_2.json'
-us_states_geojson = folium.GeoJson(us_states_geojson_path, name='geojson')
+# Print the updated merged data
+with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    print(merged_data)
 
-# Manually add population data to GeoJSON
-for feature in us_states_geojson.data['features']:
-    state_name, county_name = feature['properties']['NAME_1'], feature['properties']['NAME_2']
-    formatted_county_name = f"{county_name} County, {state_name}"
+# Uncomment the following code to replace FIPS codes with names in the 'properties' column
+merged_data['properties'] = merged_data.apply(lambda row: {
+     'State': row['StateName'],
+     'County': row['CountyName'],
+     'Population': row['Population'],
+     'Prevalence_Tobacco': row['Prevalence_Tobacco'],
+     'Prevalence_Obesity': row['Prevalence_Obesity'],
+     'Median_Income': row['Median_Income']
+ }, axis=1)
 
-    # Find the corresponding row in state_populations DataFrame
-    state_row = state_populations[state_populations['State_Name'] == state_name]
-    state_population = int(state_row['Population'].values[0]) if not state_row.empty else 0
+# Print the 'properties' column
+print(merged_data['properties'])
 
-    # Find the corresponding row in county_populations DataFrame
-    county_row = county_populations[county_populations['County_Name'] == formatted_county_name]
-    county_population = int(county_row['Population'].values[0]) if not county_row.empty else 0
+# Create a new GeoJSON object using the updated features
+updated_geojson = {'type': 'FeatureCollection', 'features': merged_data.to_dict(orient='records')}
 
-    feature['properties']['State_Population'] = state_population
-    feature['properties']['County_Population'] = county_population
-
-# Add a new GeoJSON field for predicted Ukrainian immigrants
-for feature in us_states_geojson.data['features']:
-    county_name = feature['properties']['NAME_2']
-    match = predicted_data[predicted_data['County_Name'] == county_name]
-    feature['properties']['Predicted_Ukrainian_Immigrants'] = int(match['Predicted_Ukrainian_Immigrants'].values[0]) if not match.empty else 0
-
-# Create a map centered on the United States
+# Create a Folium map centered on the United States
 us_map = folium.Map(location=[37.0902, -95.7129], zoom_start=4)
 
-# Add GeoJSON data to the map
-us_states_geojson.add_to(us_map)
+# Add the US counties GeoJSON layer to the map with the updated data
+folium.GeoJson(
+    updated_geojson,
+    name='geojson',
+    style_function=lambda feature: {
+        'fillColor': 'lightblue',
+        'color': 'black',
+        'weight': 1,
+        'fillOpacity': 0.7
+    },
+    highlight_function=lambda x: {'weight': 2, 'color': 'black'},
+    tooltip=folium.GeoJsonTooltip(fields=['County', 'State', 'Population', 'Median_Income', 'Prevalence_Tobacco', 'Prevalence_Obesity'], labels=True, sticky=True),
+    popup=folium.GeoJsonPopup(fields=['County', 'State', 'Population', 'Median_Income', 'Prevalence_Tobacco', 'Prevalence_Obesity'], labels=True, sticky=True)
+).add_to(us_map)
 
-# Add a popup with state names, populations, and predicted Ukrainian immigrants on hover
-popup = folium.features.GeoJsonPopup(
-    fields=['NAME_1', 'State_Population', 'NAME_2', 'County_Population', 'Predicted_Ukrainian_Immigrants'],
-    aliases=['State: ', 'State Population: ', 'County: ', 'County Population: ', 'Predicted Ukrainian Immigrants: '],
-    labels=True, style="background-color: yellow;",
-    parse_html=False
-)
-
-
-# Add the popup to the GeoJSON layer
-us_states_geojson.add_child(popup)
-
-# Save the map to a temporary HTML file
-temp_html_path = 'temp_us_map.html'
-us_map.save(temp_html_path, minify_html=True)
+# Save the map as an HTML file
+html_file_path = 'us_counties_map.html'
+us_map.save(html_file_path)
 
 # Open the HTML file in the default web browser
-webbrowser.open('file://' + os.path.realpath(temp_html_path))
+webbrowser.open('file://' + os.path.realpath(html_file_path))
